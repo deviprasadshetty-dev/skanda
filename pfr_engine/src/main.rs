@@ -2,6 +2,7 @@ mod indexer;
 mod searcher;
 mod bridge;
 mod simd_search;
+mod bitset;
 
 use std::env;
 use std::time::Instant;

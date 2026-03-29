@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use crate::simd_search::find_substring;
+use crate::bitset::BitSet;
 
 pub struct Searcher {
     inverted_index: HashMap<String, Vec<u32>>,
@@ -83,34 +84,96 @@ impl Searcher {
             return vec![];
         }
 
-        // Broad matching with fuzzy fallback (Iterative Footprint Expansion)
-        // Since LLMs might predict fragile terms, we calculate a score based on how many terms match.
-        // Instead of pure AND, we'll do OR and rank by match count.
-        let mut block_scores: HashMap<u32, usize> = HashMap::new();
-
+        // Proximity-aware block scoring using BitSets
+        // 1. Identify all blocks that contain at least one query term
+        let mut all_candidate_blocks = HashMap::new();
         for term in &query_terms {
             if let Some(blocks) = self.inverted_index.get(term) {
                 for &b_id in blocks {
-                    *block_scores.entry(b_id).or_insert(0) += 1;
+                    all_candidate_blocks.entry(b_id).or_insert(0);
                 }
             }
         }
 
-        // Filter blocks that have at least some overlap (e.g. at least 50% of the terms, or at least 1 term if query is small)
-        let required_matches = std::cmp::max(1, query_terms.len() / 2);
-        
-        let mut candidate_blocks: Vec<(u32, usize)> = block_scores.into_iter()
-            .filter(|&(_, count)| count >= required_matches)
-            .collect();
+        let mut block_scores: Vec<(u32, f32)> = Vec::new();
+
+        for &b_id in all_candidate_blocks.keys() {
+            let (_, _, block_len) = self.blocks[b_id as usize];
+            let mut term_bitsets: Vec<BitSet> = Vec::new();
             
+            // For each query term, find its positions in this block to build bitsets
+            // Note: In a production system, positions would be pre-indexed.
+            // Here we do a fast scan of the block because it's only 64KB.
+            let (f_id, offset, len) = self.blocks[b_id as usize];
+            let path = &self.files[f_id as usize];
+            
+            if let Ok(mut f) = File::open(path) {
+                if f.seek(SeekFrom::Start(offset)).is_ok() {
+                    let mut buffer = vec![0; len as usize];
+                    if f.read_exact(&mut buffer).is_ok() {
+                        let text = String::from_utf8_lossy(&buffer).to_lowercase();
+                        
+                        let mut found_any = false;
+                        for term in &query_terms {
+                            let mut bs = BitSet::new(len as usize);
+                            let mut search_idx = 0;
+                            let mut term_found = false;
+                            while let Some(pos) = find_substring(&text[search_idx..], term) {
+                                bs.set(search_idx + pos);
+                                search_idx += pos + term.len();
+                                term_found = true;
+                                if search_idx >= text.len() { break; }
+                            }
+                            if term_found { found_any = true; }
+                            term_bitsets.push(bs);
+                        }
+
+                        if !found_any { continue; }
+
+                        // Score based on Proximity (Density within a window)
+                        // A simple density score: overlap of dilated bitsets
+                        let mut density_mask = term_bitsets[0].clone();
+                        density_mask.proximity_expand(200); // 200 byte window
+                        
+                        let mut match_count = 1.0;
+                        for i in 1..term_bitsets.len() {
+                            if !term_bitsets[i].is_empty() {
+                                // If term i is within the window of previous terms
+                                let mut intersection = term_bitsets[i].clone();
+                                for (w_res, w_mask) in intersection.words.iter_mut().zip(density_mask.words.iter()) {
+                                    *w_res &= *w_mask;
+                                }
+                                
+                                if !intersection.is_empty() {
+                                    match_count += 1.0;
+                                } else {
+                                    match_count += 0.5; // Present but far
+                                }
+                                
+                                // Expand density mask to include this term's surroundings
+                                let mut next_dilation = term_bitsets[i].clone();
+                                next_dilation.proximity_expand(200);
+                                for (w_res, w_mask) in density_mask.words.iter_mut().zip(next_dilation.words.iter()) {
+                                    *w_res |= *w_mask;
+                                }
+                            }
+                        }
+                        
+                        if match_count >= (query_terms.len() as f32 * 0.5) {
+                            block_scores.push((b_id, match_count));
+                        }
+                    }
+                }
+            }
+        }
+
         // Sort by highest score first
-        candidate_blocks.sort_by(|a, b| b.1.cmp(&a.1));
-        // Take top 20 blocks max to avoid extreme disk reading on vague queries
-        let candidate_blocks: Vec<(u32, usize)> = candidate_blocks.into_iter().take(20).collect();
+        block_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let candidate_blocks: Vec<u32> = block_scores.into_iter().take(20).map(|(id, _)| id).collect();
 
         let mut results = Vec::new();
 
-        for (b_id, _score) in candidate_blocks {
+        for b_id in candidate_blocks {
             let (f_id, offset, len) = self.blocks[b_id as usize];
             let path = &self.files[f_id as usize];
 
@@ -120,13 +183,11 @@ impl Searcher {
                     if f.read_exact(&mut buffer).is_ok() {
                         let text = String::from_utf8_lossy(&buffer);
                         
-                        // Extract snippet centered around first found term
                         let first_term = &query_terms[0];
                         if let Some(idx) = find_substring(&text.to_lowercase(), first_term) {
                             let start = idx.saturating_sub(100);
                             let end = std::cmp::min(text.len(), idx + 200);
                             
-                            // Align to word boundaries
                             let mut snippet = String::new();
                             snippet.push_str("...");
                             snippet.push_str(&text[start..end]);
