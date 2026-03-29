@@ -1,6 +1,7 @@
 mod indexer;
 mod searcher;
 mod bridge;
+mod simd_search;
 
 use std::env;
 use std::time::Instant;

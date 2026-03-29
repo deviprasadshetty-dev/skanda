@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use crate::simd_search::find_substring;
 
 pub struct Searcher {
     inverted_index: HashMap<String, Vec<u32>>,
@@ -118,11 +119,10 @@ impl Searcher {
                     let mut buffer = vec![0; len as usize];
                     if f.read_exact(&mut buffer).is_ok() {
                         let text = String::from_utf8_lossy(&buffer);
-                        let text_lower = text.to_lowercase();
                         
                         // Extract snippet centered around first found term
                         let first_term = &query_terms[0];
-                        if let Some(idx) = text_lower.find(first_term) {
+                        if let Some(idx) = find_substring(&text.to_lowercase(), first_term) {
                             let start = idx.saturating_sub(100);
                             let end = std::cmp::min(text.len(), idx + 200);
                             
