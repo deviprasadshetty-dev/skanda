@@ -1,0 +1,4 @@
+The theory of relativity usually encompasses two interrelated theories by Albert Einstein: special relativity and general relativity. 
+Special relativity applies to all physical phenomena in the absence of gravity. General relativity explains the law of gravitation and its relation to other forces of nature.
+When calculating an orbit, you must account for the mass of the objects and the curvature of spacetime. fn calculate_orbit(mass1, mass2, distance)
+The velocity of light in a vacuum is a constant, c.
