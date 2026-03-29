@@ -13,7 +13,7 @@ impl Bridge {
 
     pub fn listen(&self, port: u16) -> std::io::Result<()> {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
-        println!("PFR Bridge listening on 127.0.0.1:{}", port);
+        println!("Skanda Bridge listening on 127.0.0.1:{}", port);
 
         for stream in listener.incoming() {
             match stream {

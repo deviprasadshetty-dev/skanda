@@ -1,13 +1,13 @@
 # Rust
-/pfr_engine/target/
+/skanda_engine/target/
 **/*.rs.bk
 
-# PFR Indices
+# Skanda Indices
 *.bin
-pfr_engine/*.bin
+skanda_engine/*.bin
 
 # Test Data
-pfr_engine/data_heavy/
+skanda_engine/data_heavy/
 
 # OS specific
 .DS_Store

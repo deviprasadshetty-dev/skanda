@@ -1,4 +1,4 @@
-use pfr_engine::{Indexer, Searcher, Bridge};
+use skanda_engine::{Indexer, Searcher, Bridge};
 use std::env;
 use std::time::Instant;
 
@@ -14,7 +14,7 @@ fn main() {
     match command.as_str() {
         "index" => {
             if args.len() != 4 {
-                println!("Usage: pfr index <dir> <index_path.bin>");
+                println!("Usage: skanda index <dir> <index_path.bin>");
                 return;
             }
             let dir = &args[2];
@@ -33,7 +33,7 @@ fn main() {
         }
         "search" => {
             if args.len() < 4 {
-                println!("Usage: pfr search <index_path.bin> <query...> [--json] [--fuzzy]");
+                println!("Usage: skanda search <index_path.bin> <query...> [--json] [--fuzzy]");
                 return;
             }
             let index_path = &args[2];
@@ -66,7 +66,7 @@ fn main() {
         }
         "serve" => {
             if args.len() != 4 {
-                println!("Usage: pfr serve <index_path.bin> <port>");
+                println!("Usage: skanda serve <index_path.bin> <port>");
                 return;
             }
             let index_path = &args[2];
@@ -84,7 +84,7 @@ fn main() {
         }
         "status" => {
             if args.len() != 3 {
-                println!("Usage: pfr status <index_path.bin>");
+                println!("Usage: skanda status <index_path.bin>");
                 return;
             }
             let index_path = &args[2];
@@ -103,8 +103,8 @@ fn main() {
 }
 
 fn print_usage() {
-    println!("Predictive Footprint Retrieval (PFR) Engine");
-    println!("Usage: pfr <command> [args]");
+    println!("Skanda Engine");
+    println!("Usage: skanda <command> [args]");
     println!("Commands:");
     println!("  index <dir> <index.bin>      Index a directory of text files");
     println!("  search <index.bin> <query>   Search footprints (use --json for machine output, --fuzzy for typos)");
@@ -112,7 +112,7 @@ fn print_usage() {
     println!("  status <index.bin>           Show index metadata");
 }
 
-fn format_results_json(results: &[pfr_engine::SearchResult]) -> String {
+fn format_results_json(results: &[skanda_engine::SearchResult]) -> String {
     let mut json = String::from("[\n");
     for (i, res) in results.iter().enumerate() {
         json.push_str("  {\n");
