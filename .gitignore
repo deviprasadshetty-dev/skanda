@@ -1,0 +1,19 @@
+# Rust
+/pfr_engine/target/
+**/*.rs.bk
+
+# PFR Indices
+*.bin
+pfr_engine/*.bin
+
+# Test Data
+pfr_engine/data_heavy/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Misc
+results.tsv
+everythingpossible.md
+C:\Users\Deviprasad Shetty\.gemini\tmp\res\

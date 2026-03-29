@@ -33,17 +33,24 @@ fn main() {
         }
         "search" => {
             if args.len() < 4 {
-                println!("Usage: pfr search <index_path.bin> <query...>");
+                println!("Usage: pfr search <index_path.bin> <query...> [--json] [--fuzzy]");
                 return;
             }
             let index_path = &args[2];
-            let query = args[3..].join(" ");
+            let is_json = args.contains(&String::from("--json"));
+            let is_fuzzy = args.contains(&String::from("--fuzzy"));
+            
+            let query_parts: Vec<String> = args[3..].iter()
+                .filter(|a| !a.starts_with("--"))
+                .cloned()
+                .collect();
+            let query = query_parts.join(" ");
 
             match Searcher::load_from_disk(index_path) {
                 Ok(s) => {
-                    let results = s.search(&query);
+                    let results = s.search(&query, is_fuzzy);
                     
-                    if args.contains(&String::from("--json")) {
+                    if is_json {
                         println!("{}", format_results_json(&results));
                     } else {
                         println!("Found {} results", results.len());
@@ -100,7 +107,7 @@ fn print_usage() {
     println!("Usage: pfr <command> [args]");
     println!("Commands:");
     println!("  index <dir> <index.bin>      Index a directory of text files");
-    println!("  search <index.bin> <query>   Search footprints (use --json for machine output)");
+    println!("  search <index.bin> <query>   Search footprints (use --json for machine output, --fuzzy for typos)");
     println!("  serve <index.bin> <port>     Start the JSON HTTP bridge");
     println!("  status <index.bin>           Show index metadata");
 }

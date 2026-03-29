@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::simd_search::find_substring;
 use crate::bitset::BitSet;
 use crate::compression::decode_inverted_entry;
+use crate::fuzzy_search::{FuzzyMatcher, levenshtein_distance};
 
 pub struct Searcher {
     // Term -> Map<BlockID, [BytePositions]>
@@ -32,6 +33,7 @@ impl Searcher {
             val
         }
 
+        // 1. Files
         let num_files = read_u32(&buffer, &mut cursor);
         let mut files = Vec::with_capacity(num_files as usize);
         for _ in 0..num_files {
@@ -42,6 +44,7 @@ impl Searcher {
             files.push(path_str);
         }
 
+        // 2. Blocks
         let num_blocks = read_u32(&buffer, &mut cursor);
         let mut blocks = Vec::with_capacity(num_blocks as usize);
         for _ in 0..num_blocks {
@@ -52,6 +55,7 @@ impl Searcher {
             blocks.push((f_id, off, len));
         }
 
+        // 3. Compressed Inverted Index with Positions
         let num_terms = read_u32(&buffer, &mut cursor);
         let mut inverted_index = HashMap::with_capacity(num_terms as usize);
         for _ in 0..num_terms {
@@ -74,7 +78,7 @@ impl Searcher {
         Ok(Self { inverted_index, blocks, files })
     }
 
-    pub fn search(&self, query: &str) -> Vec<SearchResult> {
+    pub fn search(&self, query: &str, fuzzy: bool) -> Vec<SearchResult> {
         let query_terms: Vec<String> = query
             .to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
@@ -86,16 +90,41 @@ impl Searcher {
             return vec![];
         }
 
+        // 1. Lexicon Expansion for Fuzzy Matching
+        let mut expanded_terms: HashMap<String, f32> = HashMap::new(); 
+        for term in &query_terms {
+            expanded_terms.insert(term.clone(), 1.0);
+            
+            if fuzzy {
+                let matcher = FuzzyMatcher::new(term, 1);
+                for existing_term in self.inverted_index.keys() {
+                    if existing_term.len() < 3 || existing_term == term { continue; }
+                    let len_diff = (existing_term.len() as isize - term.len() as isize).abs();
+                    if len_diff > 1 { continue; }
+
+                    if matcher.find(existing_term).is_some() {
+                        if levenshtein_distance(term, existing_term) == 1 {
+                            expanded_terms.entry(existing_term.clone())
+                                .and_modify(|e| *e = e.max(0.7))
+                                .or_insert(0.7);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. IDF Calculation
         let total_blocks = self.blocks.len() as f32;
         let mut term_idfs = HashMap::new();
-        for term in &query_terms {
+        for term in expanded_terms.keys() {
             let df = self.inverted_index.get(term).map(|m| m.len()).unwrap_or(0) as f32;
             let idf = (total_blocks / (df + 1.0)).ln();
             term_idfs.insert(term.clone(), idf);
         }
 
+        // 3. Candidate Block Selection
         let mut all_candidate_blocks = HashMap::new();
-        for term in &query_terms {
+        for term in expanded_terms.keys() {
             if let Some(block_map) = self.inverted_index.get(term) {
                 for &b_id in block_map.keys() {
                     all_candidate_blocks.entry(b_id).or_insert(0);
@@ -103,66 +132,61 @@ impl Searcher {
             }
         }
 
+        // 4. Scoring
         let mut block_scores: Vec<(u32, f32)> = Vec::new();
-
         for &b_id in all_candidate_blocks.keys() {
             let (_, _, block_len) = self.blocks[b_id as usize];
             let mut term_bitsets: Vec<BitSet> = Vec::new();
-            
             let mut block_total_idf = 0.0;
-            let mut found_count = 0;
-            for term in &query_terms {
+            
+            for term in expanded_terms.keys() {
                 let mut bs = BitSet::new(block_len as usize);
                 if let Some(block_map) = self.inverted_index.get(term) {
                     if let Some(positions) = block_map.get(&b_id) {
                         for &pos in positions {
                             bs.set(pos as usize);
                         }
-                        let idf = term_idfs[term];
-                        block_total_idf += idf;
-                        found_count += 1;
+                        block_total_idf += term_idfs[term] * expanded_terms[term];
                     }
                 }
                 term_bitsets.push(bs);
             }
 
-            if found_count == 0 { continue; }
+            let active_bitsets: Vec<&BitSet> = term_bitsets.iter().filter(|b| !b.is_empty()).collect();
+            if active_bitsets.is_empty() { continue; }
 
-            let mut density_mask = term_bitsets[0].clone();
-            density_mask.proximity_expand(250); 
-            
             let mut proximity_score = 1.0;
-            for i in 1..term_bitsets.len() {
-                if !term_bitsets[i].is_empty() {
-                    let mut intersection = term_bitsets[i].clone();
-                    for (w_res, w_mask) in intersection.words.iter_mut().zip(density_mask.words.iter()) {
-                        *w_res &= *w_mask;
-                    }
-                    
-                    if !intersection.is_empty() {
-                        proximity_score += 1.0;
-                    } else {
-                        proximity_score += 0.3; 
-                    }
-                    
-                    let mut next_dilation = term_bitsets[i].clone();
-                    next_dilation.proximity_expand(250);
-                    for (w_res, w_mask) in density_mask.words.iter_mut().zip(next_dilation.words.iter()) {
-                        *w_res |= *w_mask;
-                    }
+            let mut density_mask = active_bitsets[0].clone();
+            density_mask.proximity_expand(250);
+            
+            for i in 1..active_bitsets.len() {
+                let mut intersection = active_bitsets[i].clone();
+                for (w_res, w_mask) in intersection.words.iter_mut().zip(density_mask.words.iter()) {
+                    *w_res &= *w_mask;
+                }
+                
+                if !intersection.is_empty() {
+                    proximity_score += 1.0;
+                } else {
+                    proximity_score += 0.3;
+                }
+                
+                let mut next_dilation = active_bitsets[i].clone();
+                next_dilation.proximity_expand(250);
+                for (w_res, w_mask) in density_mask.words.iter_mut().zip(next_dilation.words.iter()) {
+                    *w_res |= *w_mask;
                 }
             }
             
-            let final_score = block_total_idf * proximity_score;
-            block_scores.push((b_id, final_score));
+            block_scores.push((b_id, block_total_idf * proximity_score));
         }
 
         block_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        let candidate_blocks: Vec<u32> = block_scores.into_iter().take(20).map(|(id, _)| id).collect();
+        let top_blocks: Vec<u32> = block_scores.into_iter().take(20).map(|(id, _)| id).collect();
 
+        // 5. Verification and Snippet Extraction
         let mut results = Vec::new();
-
-        for b_id in candidate_blocks {
+        for b_id in top_blocks {
             let (f_id, offset, len) = self.blocks[b_id as usize];
             let path = &self.files[f_id as usize];
 
@@ -174,7 +198,7 @@ impl Searcher {
                         let text_lower = text.to_lowercase();
                         
                         let mut snippet_pos = None;
-                        for term in &query_terms {
+                        for term in expanded_terms.keys() {
                             if let Some(idx) = find_substring(&text_lower, term) {
                                 snippet_pos = Some(idx);
                                 break;
@@ -184,15 +208,9 @@ impl Searcher {
                         if let Some(idx) = snippet_pos {
                             let start = idx.saturating_sub(100);
                             let end = std::cmp::min(text.len(), idx + 200);
-                            
-                            let mut snippet = String::new();
-                            snippet.push_str("...");
-                            snippet.push_str(&text[start..end]);
-                            snippet.push_str("...");
-                            
                             results.push(SearchResult {
                                 file_path: path.clone(),
-                                snippet,
+                                snippet: format!("...{}...", &text[start..end]),
                             });
                         }
                     }

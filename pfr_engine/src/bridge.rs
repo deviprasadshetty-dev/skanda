@@ -38,8 +38,10 @@ impl Bridge {
                 if parts.len() >= 2 && parts[0] == "GET" {
                     let path = parts[1];
                     if path.starts_with("/search?q=") {
-                        let query = &path[10..].replace('+', " ").replace("%20", " ");
-                        let results = self.searcher.search(query);
+                        let is_fuzzy = path.contains("&fuzzy=true");
+                        let q_end = path.find('&').unwrap_or(path.len());
+                        let query = &path[10..q_end].replace('+', " ").replace("%20", " ");
+                        let results = self.searcher.search(query, is_fuzzy);
                         
                         let mut response_body = String::from("[\n");
                         for (i, res) in results.iter().enumerate() {

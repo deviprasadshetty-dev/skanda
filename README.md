@@ -29,16 +29,17 @@ cargo build --release
 ./pfr index <directory_to_index> index.bin
 ```
 
-### 3. Search
+### 3. Search (with Typo Tolerance)
 ```bash
-./pfr search index.bin "your predicted footprints"
+./pfr search index.bin "your predicted footprints" --fuzzy
 ```
+The `--fuzzy` flag enables **Levenshtein-tolerant expansion**. If the LLM predicts `token_type_embeddings` but the corpus has `token_type_ids`, PFR will still find it.
 
 ### 4. JSON API (Bridge)
 ```bash
 ./pfr serve index.bin 8080
 ```
-Query via: `http://localhost:8080/search?q=footprint1+footprint2`
+Query via: `http://localhost:8080/search?q=footprint1+footprint2&fuzzy=true`
 
 ## LLM Integration
 

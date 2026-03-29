@@ -5,6 +5,7 @@ pub mod simd_search;
 pub mod bitset;
 pub mod compression;
 pub mod thread_pool;
+pub mod fuzzy_search;
 
 pub use indexer::Indexer;
 pub use searcher::{Searcher, SearchResult};
