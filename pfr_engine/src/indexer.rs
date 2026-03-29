@@ -3,15 +3,15 @@ use std::fs::{self, File};
 use std::io::{Read, Write, BufWriter};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use crate::compression::encode_delta;
+use crate::compression::encode_inverted_entry;
 use crate::thread_pool::ThreadPool;
 
 const BLOCK_SIZE: usize = 64 * 1024; // 64KB blocks
 
 pub struct Indexer {
-    inverted_index: HashMap<String, Vec<u32>>,
-    blocks: Vec<(u32, u64, u32)>, // (File ID, Offset, Length)
-    files: Vec<String>, // File paths
+    inverted_index: HashMap<String, Vec<(u32, Vec<u32>)>>,
+    blocks: Vec<(u32, u64, u32)>, 
+    files: Vec<String>, 
 }
 
 impl Indexer {
@@ -32,15 +32,16 @@ impl Indexer {
         let paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
         let pool = ThreadPool::new(8);
         
-        let shared_index = Arc::new(Mutex::new(HashMap::<String, Vec<u32>>::new()));
-        let shared_blocks = Arc::new(Mutex::new(Vec::::<(u32, u64, u32, u32)>::new())); // (file_id, offset, len, block_id)
+        // Collector for thread results
+        let all_local_indices = Arc::new(Mutex::new(Vec::<HashMap<String, Vec<(u32, Vec<u32>)>>>::new()));
+        let all_local_blocks = Arc::new(Mutex::new(Vec::<Vec<(u32, u64, u32, u32)>>::new()));
         let shared_files = Arc::new(Mutex::new(Vec::<String>::new()));
+        
+        // Use a central atomic-like counter for block IDs to ensure uniqueness
+        let global_block_counter = Arc::new(Mutex::new(0u32));
 
         for (file_id, path) in paths.into_iter().enumerate() {
-            if path.is_dir() {
-                // Recursion skipped for simplicity in parallel version, or handled differently
-                continue;
-            }
+            if path.is_dir() { continue; }
             if !path.is_file() { continue; }
             
             let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
@@ -55,10 +56,14 @@ impl Indexer {
                 files.push(path_str);
             }
 
-            let shared_index = Arc::clone(&shared_index);
-            let shared_blocks = Arc::clone(&shared_blocks);
+            let local_indices = Arc::clone(&all_local_indices);
+            let local_blocks_collector = Arc::clone(&all_local_blocks);
+            let block_counter = Arc::clone(&global_block_counter);
             
             pool.execute(move || {
+                let mut local_index: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
+                let mut local_blocks: Vec<(u32, u64, u32, u32)> = Vec::new();
+
                 if let Ok(mut f) = File::open(&path) {
                     let mut buffer = vec![0; BLOCK_SIZE];
                     let mut offset = 0u64;
@@ -69,45 +74,70 @@ impl Indexer {
                             Err(_) => break,
                         };
 
-                        // We need a globally unique block_id.
-                        // For simplicity in parallel, we'll store local results and merge later,
-                        // or use a central counter.
-                        let mut blocks = shared_blocks.lock().unwrap();
-                        let block_id = blocks.len() as u32;
-                        blocks.push((file_id, offset, bytes_read as u32, block_id));
-                        drop(blocks);
+                        let block_id = {
+                            let mut count = block_counter.lock().unwrap();
+                            let id = *count;
+                            *count += 1;
+                            id
+                        };
 
-                        let text = String::from_utf8_lossy(&buffer[..bytes_read]);
-                        let mut unique_words = HashSet::new();
-                        for word in text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()) {
-                            unique_words.insert(word.to_string());
+                        local_blocks.push((file_id, offset, bytes_read as u32, block_id));
+                        let text = String::from_utf8_lossy(&buffer[..bytes_read]).to_lowercase();
+                        
+                        let mut block_terms: HashMap<String, Vec<u32>> = HashMap::new();
+                        let mut start = 0;
+                        for (idx, c) in text.char_indices() {
+                            if !c.is_alphanumeric() {
+                                if start < idx {
+                                    let word = &text[start..idx];
+                                    block_terms.entry(word.to_string()).or_default().push(start as u32);
+                                }
+                                start = idx + c.len_utf8();
+                            }
+                        }
+                        if start < text.len() {
+                            let word = &text[start..];
+                            block_terms.entry(word.to_string()).or_default().push(start as u32);
                         }
 
-                        let mut index = shared_index.lock().unwrap();
-                        for word in unique_words {
-                            index.entry(word).or_insert_with(Vec::new).push(block_id);
+                        for (word, positions) in block_terms {
+                            local_index.entry(word).or_default().push((block_id, positions));
                         }
-                        drop(index);
 
                         offset += bytes_read as u64;
                     }
                 }
+                
+                local_indices.lock().unwrap().push(local_index);
+                local_blocks_collector.lock().unwrap().push(local_blocks);
             });
         }
 
-        // Wait for all tasks (implicitly on drop of pool)
         drop(pool);
 
-        self.inverted_index = Arc::try_unwrap(shared_index).unwrap().into_inner().unwrap();
-        let mut blocks_with_id = Arc::try_unwrap(shared_blocks).unwrap().into_inner().unwrap();
-        // Sorting blocks by ID to ensure correct indexing
-        blocks_with_id.sort_by_key(|b| b.3);
-        self.blocks = blocks_with_id.into_iter().map(|(f, o, l, _)| (f, o, l)).collect();
+        // Merge local indices
+        let mut final_index: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
+        let local_indices = Arc::try_unwrap(all_local_indices).unwrap().into_inner().unwrap();
+        for idx in local_indices {
+            for (word, entries) in idx {
+                final_index.entry(word).or_default().extend(entries);
+            }
+        }
+        
+        // Merge blocks
+        let mut final_blocks: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let local_blocks_collector = Arc::try_unwrap(all_local_blocks).unwrap().into_inner().unwrap();
+        for blocks in local_blocks_collector {
+            final_blocks.extend(blocks);
+        }
+        final_blocks.sort_by_key(|b| b.3);
+        
+        self.inverted_index = final_index;
+        self.blocks = final_blocks.into_iter().map(|(f, o, l, _)| (f, o, l)).collect();
         self.files = Arc::try_unwrap(shared_files).unwrap().into_inner().unwrap();
 
-        // Sort block IDs within inverted index because they might be added out of order
-        for ids in self.inverted_index.values_mut() {
-            ids.sort_unstable();
+        for entries in self.inverted_index.values_mut() {
+            entries.sort_by_key(|e| e.0);
         }
     }
 
@@ -130,13 +160,12 @@ impl Indexer {
         }
 
         writer.write_all(&(self.inverted_index.len() as u32).to_le_bytes())?;
-        for (term, block_ids) in &self.inverted_index {
+        for (term, block_positions) in &self.inverted_index {
             let bytes = term.as_bytes();
             writer.write_all(&(bytes.len() as u16).to_le_bytes())?;
             writer.write_all(bytes)?;
 
-            let encoded = encode_delta(block_ids);
-            writer.write_all(&(block_ids.len() as u32).to_le_bytes())?;
+            let encoded = encode_inverted_entry(block_positions);
             writer.write_all(&(encoded.len() as u32).to_le_bytes())?;
             writer.write_all(&encoded)?;
         }
