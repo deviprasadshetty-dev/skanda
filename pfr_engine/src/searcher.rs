@@ -7,6 +7,7 @@ use crate::bitset::BitSet;
 use crate::compression::decode_inverted_entry;
 
 pub struct Searcher {
+    // Term -> Map<BlockID, [BytePositions]>
     inverted_index: HashMap<String, HashMap<u32, Vec<u32>>>,
     blocks: Vec<(u32, u64, u32)>, 
     files: Vec<String>, 
@@ -85,7 +86,6 @@ impl Searcher {
             return vec![];
         }
 
-        // Calculate IDF for each query term
         let total_blocks = self.blocks.len() as f32;
         let mut term_idfs = HashMap::new();
         for term in &query_terms {
@@ -128,7 +128,6 @@ impl Searcher {
 
             if found_count == 0 { continue; }
 
-            // Score based on Proximity + IDF
             let mut density_mask = term_bitsets[0].clone();
             density_mask.proximity_expand(250); 
             
@@ -143,7 +142,7 @@ impl Searcher {
                     if !intersection.is_empty() {
                         proximity_score += 1.0;
                     } else {
-                        proximity_score += 0.3; // Less weight if far
+                        proximity_score += 0.3; 
                     }
                     
                     let mut next_dilation = term_bitsets[i].clone();
@@ -154,9 +153,7 @@ impl Searcher {
                 }
             }
             
-            // Final score: (Sum of IDFs) * Proximity Multiplier
             let final_score = block_total_idf * proximity_score;
-            
             block_scores.push((b_id, final_score));
         }
 
@@ -202,7 +199,17 @@ impl Searcher {
                 }
             }
         }
-
         results
+    }
+
+    pub fn print_status(&self) {
+        println!("Index Status:");
+        println!("  Files indexed: {}", self.files.len());
+        println!("  Total blocks:  {}", self.blocks.len());
+        println!("  Unique terms:  {}", self.inverted_index.len());
+        println!("Files:");
+        for (i, f) in self.files.iter().enumerate() {
+            println!("  [{}] {}", i, f);
+        }
     }
 }

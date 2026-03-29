@@ -1,22 +1,11 @@
-mod indexer;
-mod searcher;
-mod bridge;
-mod simd_search;
-mod bitset;
-mod compression;
-mod thread_pool;
-
+use pfr_engine::{Indexer, Searcher, Bridge};
 use std::env;
 use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        println!("Usage: pfr_engine <command> [args]");
-        println!("Commands:");
-        println!("  index <dir> <index_path.bin>");
-        println!("  search <index_path.bin> <query>");
-        println!("  serve <index_path.bin> <port>");
+        print_usage();
         return;
     }
 
@@ -25,7 +14,7 @@ fn main() {
     match command.as_str() {
         "index" => {
             if args.len() != 4 {
-                println!("Usage: pfr_engine index <dir> <index_path.bin>");
+                println!("Usage: pfr index <dir> <index_path.bin>");
                 return;
             }
             let dir = &args[2];
@@ -33,10 +22,9 @@ fn main() {
 
             println!("Indexing directory: {}", dir);
             let start = Instant::now();
-            let mut idx = indexer::Indexer::new();
+            let mut idx = Indexer::new();
             idx.index_directory(dir);
             
-            println!("Saving to {}...", index_path);
             if let Err(e) = idx.save_to_disk(index_path) {
                 eprintln!("Failed to save index: {}", e);
             } else {
@@ -45,26 +33,25 @@ fn main() {
         }
         "search" => {
             if args.len() < 4 {
-                println!("Usage: pfr_engine search <index_path.bin> <query...>");
+                println!("Usage: pfr search <index_path.bin> <query...>");
                 return;
             }
             let index_path = &args[2];
             let query = args[3..].join(" ");
 
-            println!("Loading index from {}...", index_path);
-            let start = Instant::now();
-            match searcher::Searcher::load_from_disk(index_path) {
+            match Searcher::load_from_disk(index_path) {
                 Ok(s) => {
-                    println!("Index loaded in {:?}", start.elapsed());
-                    println!("Searching for: '{}'", query);
-                    let search_start = Instant::now();
                     let results = s.search(&query);
-                    println!("Found {} results in {:?}", results.len(), search_start.elapsed());
-
-                    for (i, res) in results.iter().enumerate() {
-                        println!("--- Result {} ---", i + 1);
-                        println!("File: {}", res.file_path);
-                        println!("Snippet:\n{}\n", res.snippet);
+                    
+                    if args.contains(&String::from("--json")) {
+                        println!("{}", format_results_json(&results));
+                    } else {
+                        println!("Found {} results", results.len());
+                        for (i, res) in results.iter().enumerate() {
+                            println!("--- Result {} ---", i + 1);
+                            println!("File: {}", res.file_path);
+                            println!("Snippet:\n{}\n", res.snippet);
+                        }
                     }
                 }
                 Err(e) => eprintln!("Failed to load index: {}", e),
@@ -72,16 +59,15 @@ fn main() {
         }
         "serve" => {
             if args.len() != 4 {
-                println!("Usage: pfr_engine serve <index_path.bin> <port>");
+                println!("Usage: pfr serve <index_path.bin> <port>");
                 return;
             }
             let index_path = &args[2];
             let port = args[3].parse::<u16>().expect("Invalid port");
 
-            println!("Loading index from {}...", index_path);
-            match searcher::Searcher::load_from_disk(index_path) {
+            match Searcher::load_from_disk(index_path) {
                 Ok(s) => {
-                    let b = bridge::Bridge::new(s);
+                    let b = Bridge::new(s);
                     if let Err(e) = b.listen(port) {
                         eprintln!("Bridge error: {}", e);
                     }
@@ -89,8 +75,47 @@ fn main() {
                 Err(e) => eprintln!("Failed to load index: {}", e),
             }
         }
+        "status" => {
+            if args.len() != 3 {
+                println!("Usage: pfr status <index_path.bin>");
+                return;
+            }
+            let index_path = &args[2];
+            match Searcher::load_from_disk(index_path) {
+                Ok(s) => {
+                    s.print_status();
+                }
+                Err(e) => eprintln!("Failed to load index: {}", e),
+            }
+        }
         _ => {
             println!("Unknown command: {}", command);
+            print_usage();
         }
     }
+}
+
+fn print_usage() {
+    println!("Predictive Footprint Retrieval (PFR) Engine");
+    println!("Usage: pfr <command> [args]");
+    println!("Commands:");
+    println!("  index <dir> <index.bin>      Index a directory of text files");
+    println!("  search <index.bin> <query>   Search footprints (use --json for machine output)");
+    println!("  serve <index.bin> <port>     Start the JSON HTTP bridge");
+    println!("  status <index.bin>           Show index metadata");
+}
+
+fn format_results_json(results: &[pfr_engine::SearchResult]) -> String {
+    let mut json = String::from("[\n");
+    for (i, res) in results.iter().enumerate() {
+        json.push_str("  {\n");
+        json.push_str(&format!("    \"file\": \"{}\",\n", res.file_path.replace('\\', "/")));
+        let escaped = res.snippet.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r");
+        json.push_str(&format!("    \"snippet\": \"{}\"\n", escaped));
+        json.push_str("  }");
+        if i < results.len() - 1 { json.push(','); }
+        json.push('\n');
+    }
+    json.push(']');
+    json
 }
