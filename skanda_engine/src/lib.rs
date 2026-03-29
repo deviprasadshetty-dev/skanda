@@ -4,34 +4,20 @@ pub mod bridge;
 pub mod simd_search;
 pub mod bitset;
 pub mod compression;
-pub mod thread_pool;
 pub mod fuzzy_search;
 
 pub use indexer::Indexer;
 pub use searcher::{Searcher, SearchResult};
 pub use bridge::Bridge;
 
-#[derive(Debug)]
+use thiserror::Error;
+
+#[derive(Error, Debug)]
 pub enum SkandaError {
-    Io(std::io::Error),
+    #[error("IO Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Invalid Index")]
     InvalidIndex,
+    #[error("Empty Query")]
     EmptyQuery,
 }
-
-impl From<std::io::Error> for SkandaError {
-    fn from(err: std::io::Error) -> Self {
-        SkandaError::Io(err)
-    }
-}
-
-impl std::fmt::Display for SkandaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SkandaError::Io(e) => write!(f, "IO error: {}", e),
-            SkandaError::InvalidIndex => write!(f, "Invalid or corrupted index file"),
-            SkandaError::EmptyQuery => write!(f, "Search query cannot be empty"),
-        }
-    }
-}
-
-impl std::error::Error for SkandaError {}

@@ -1,5 +1,6 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
+use url::Url;
 use crate::searcher::Searcher;
 
 pub struct Bridge {
@@ -31,43 +32,40 @@ impl Bridge {
         if let Ok(n) = stream.read(&mut buffer) {
             let request = String::from_utf8_lossy(&buffer[..n]);
             
-            // Minimal HTTP-like parsing for the query
-            // Expecting: GET /search?q=footprint1+footprint2 HTTP/1.1
             if let Some(line) = request.lines().next() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 && parts[0] == "GET" {
                     let path = parts[1];
-                    if path.starts_with("/search?q=") {
-                        let is_fuzzy = path.contains("&fuzzy=true");
-                        let q_end = path.find('&').unwrap_or(path.len());
-                        let query = &path[10..q_end].replace('+', " ").replace("%20", " ");
-                        let results = self.searcher.search(query, is_fuzzy);
-                        
-                        let mut response_body = String::from("[\n");
-                        for (i, res) in results.iter().enumerate() {
-                            // Simple JSON manual formatting to avoid dependencies
-                            response_body.push_str("  {\n");
-                            response_body.push_str(&format!("    \"file\": \"{}\",\n", res.file_path.replace('\\', "/")));
-                            // Escape quotes in snippet for valid JSON
-                            let escaped_snippet = res.snippet.replace('"', "\\\"");
-                            response_body.push_str(&format!("    \"snippet\": \"{}\"\n", escaped_snippet));
-                            response_body.push_str("  }");
-                            if i < results.len() - 1 {
-                                response_body.push_str(",");
-                            }
-                            response_body.push_str("\n");
-                        }
-                        response_body.push_str("]");
+                    let url_str = format!("http://localhost{}", path);
+                    if let Ok(url) = Url::parse(&url_str) {
+                        if url.path() == "/search" {
+                            let mut query = String::new();
+                            let mut is_fuzzy = false;
 
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            response_body.len(),
-                            response_body
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                    } else {
-                        let _ = stream.write_all(b"HTTP/1.1 404 NOT FOUND\r\n\r\n");
+                            for (k, v) in url.query_pairs() {
+                                if k == "q" {
+                                    query = v.into_owned();
+                                } else if k == "fuzzy" && v == "true" {
+                                    is_fuzzy = true;
+                                }
+                            }
+
+                            if !query.is_empty() {
+                                let results = self.searcher.search(&query, is_fuzzy);
+                                
+                                if let Ok(json_response) = serde_json::to_string(&results) {
+                                    let response = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                        json_response.len(),
+                                        json_response
+                                    );
+                                    let _ = stream.write_all(response.as_bytes());
+                                    return;
+                                }
+                            }
+                        }
                     }
+                    let _ = stream.write_all(b"HTTP/1.1 404 NOT FOUND\r\n\r\n");
                 }
             }
         }

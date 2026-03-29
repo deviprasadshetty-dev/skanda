@@ -69,7 +69,6 @@ impl FuzzyMatcher {
         None
     }
 }
-
 /// A simplified Levenshtein helper for short strings
 pub fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     let v1: Vec<char> = s1.chars().collect();
@@ -80,20 +79,20 @@ pub fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     if n == 0 { return m; }
     if m == 0 { return n; }
 
-    let mut dp = vec![vec![0; m + 1]; n + 1];
+    let mut v0: Vec<usize> = (0..=m).collect();
+    let mut v1_row = vec![0; m + 1];
 
-    for i in 0..=n { dp[i][0] = i; }
-    for j in 0..=m { dp[0][j] = j; }
-
-    for i in 1..=n {
-        for j in 1..=m {
-            let cost = if v1[i-1] == v2[j-1] { 0 } else { 1 };
-            dp[i][j] = std::cmp::min(
-                std::cmp::min(dp[i-1][j] + 1, dp[i][j-1] + 1),
-                dp[i-1][j-1] + cost
+    for i in 0..n {
+        v1_row[0] = i + 1;
+        for j in 0..m {
+            let cost = if v1[i] == v2[j] { 0 } else { 1 };
+            v1_row[j + 1] = std::cmp::min(
+                std::cmp::min(v1_row[j] + 1, v0[j + 1] + 1),
+                v0[j] + cost
             );
         }
+        std::mem::swap(&mut v0, &mut v1_row);
     }
 
-    dp[n][m]
+    v0[m]
 }

@@ -2,29 +2,35 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use memmap2::Mmap;
 use crate::simd_search::find_substring;
 use crate::bitset::BitSet;
 use crate::compression::decode_inverted_entry;
 use crate::fuzzy_search::{FuzzyMatcher, levenshtein_distance};
+use crate::SkandaError;
+
+const MAX_DICT_CAPACITY: usize = 1_000_000;
+const PROXIMITY_DILATION: usize = 250;
+const PROXIMITY_PENALTY: f32 = 0.3;
 
 pub struct Searcher {
-    // Term -> Map<BlockID, [BytePositions]>
     inverted_index: HashMap<String, HashMap<u32, Vec<u32>>>,
     blocks: Vec<(u32, u64, u32)>, 
     files: Vec<String>, 
 }
 
+#[derive(serde::Serialize)]
 pub struct SearchResult {
     pub file_path: String,
     pub snippet: String,
 }
 
 impl Searcher {
-    pub fn load_from_disk<P: AsRef<Path>>(index_path: P) -> std::io::Result<Self> {
-        let mut file = File::open(index_path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-
+    pub fn load_from_disk<P: AsRef<Path>>(index_path: P) -> Result<Self, SkandaError> {
+        let file = File::open(index_path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        let buffer = &mmap[..];
+        
         let mut cursor = 0;
 
         fn read_u32(buffer: &[u8], cursor: &mut usize) -> u32 {
@@ -33,42 +39,49 @@ impl Searcher {
             val
         }
 
-        // 1. Files
-        let num_files = read_u32(&buffer, &mut cursor);
-        let mut files = Vec::with_capacity(num_files as usize);
+        if buffer.len() < 4 { return Err(SkandaError::InvalidIndex); }
+        let num_files = read_u32(buffer, &mut cursor);
+        let mut files = Vec::with_capacity(num_files.min(MAX_DICT_CAPACITY as u32) as usize);
         for _ in 0..num_files {
+            if cursor + 2 > buffer.len() { return Err(SkandaError::InvalidIndex); }
             let len = u16::from_le_bytes(buffer[cursor..cursor+2].try_into().unwrap()) as usize;
             cursor += 2;
+            if cursor + len > buffer.len() { return Err(SkandaError::InvalidIndex); }
             let path_str = String::from_utf8_lossy(&buffer[cursor..cursor+len]).to_string();
             cursor += len;
             files.push(path_str);
         }
 
-        // 2. Blocks
-        let num_blocks = read_u32(&buffer, &mut cursor);
-        let mut blocks = Vec::with_capacity(num_blocks as usize);
+        if cursor + 4 > buffer.len() { return Err(SkandaError::InvalidIndex); }
+        let num_blocks = read_u32(buffer, &mut cursor);
+        let mut blocks = Vec::with_capacity(num_blocks.min(MAX_DICT_CAPACITY as u32) as usize);
         for _ in 0..num_blocks {
-            let f_id = read_u32(&buffer, &mut cursor);
+            if cursor + 16 > buffer.len() { return Err(SkandaError::InvalidIndex); }
+            let f_id = read_u32(buffer, &mut cursor);
             let off = u64::from_le_bytes(buffer[cursor..cursor+8].try_into().unwrap());
             cursor += 8;
-            let len = read_u32(&buffer, &mut cursor);
+            let len = read_u32(buffer, &mut cursor);
             blocks.push((f_id, off, len));
         }
 
-        // 3. Compressed Inverted Index with Positions
-        let num_terms = read_u32(&buffer, &mut cursor);
-        let mut inverted_index = HashMap::with_capacity(num_terms as usize);
+        if cursor + 4 > buffer.len() { return Err(SkandaError::InvalidIndex); }
+        let num_terms = read_u32(buffer, &mut cursor);
+        let mut inverted_index = HashMap::with_capacity(num_terms.min(MAX_DICT_CAPACITY as u32) as usize);
         for _ in 0..num_terms {
+            if cursor + 2 > buffer.len() { return Err(SkandaError::InvalidIndex); }
             let term_len = u16::from_le_bytes(buffer[cursor..cursor+2].try_into().unwrap()) as usize;
             cursor += 2;
+            if cursor + term_len > buffer.len() { return Err(SkandaError::InvalidIndex); }
             let term = String::from_utf8_lossy(&buffer[cursor..cursor+term_len]).to_string();
             cursor += term_len;
 
-            let encoded_len = read_u32(&buffer, &mut cursor) as usize;
+            if cursor + 4 > buffer.len() { return Err(SkandaError::InvalidIndex); }
+            let encoded_len = read_u32(buffer, &mut cursor) as usize;
+            if cursor + encoded_len > buffer.len() { return Err(SkandaError::InvalidIndex); }
             let decoded = decode_inverted_entry(&buffer[cursor..cursor+encoded_len]);
             cursor += encoded_len;
             
-            let mut block_map = HashMap::with_capacity(decoded.len());
+            let mut block_map = HashMap::with_capacity(decoded.len().min(100));
             for (b_id, positions) in decoded {
                 block_map.insert(b_id, positions);
             }
@@ -90,7 +103,6 @@ impl Searcher {
             return vec![];
         }
 
-        // 1. Lexicon Expansion for Fuzzy Matching
         let mut expanded_terms: HashMap<String, f32> = HashMap::new(); 
         for term in &query_terms {
             expanded_terms.insert(term.clone(), 1.0);
@@ -113,7 +125,6 @@ impl Searcher {
             }
         }
 
-        // 2. IDF Calculation
         let total_blocks = self.blocks.len() as f32;
         let mut term_idfs = HashMap::new();
         for term in expanded_terms.keys() {
@@ -122,7 +133,6 @@ impl Searcher {
             term_idfs.insert(term.clone(), idf);
         }
 
-        // 3. Candidate Block Selection
         let mut all_candidate_blocks = HashMap::new();
         for term in expanded_terms.keys() {
             if let Some(block_map) = self.inverted_index.get(term) {
@@ -132,7 +142,6 @@ impl Searcher {
             }
         }
 
-        // 4. Scoring
         let mut block_scores: Vec<(u32, f32)> = Vec::new();
         for &b_id in all_candidate_blocks.keys() {
             let (_, _, block_len) = self.blocks[b_id as usize];
@@ -157,7 +166,7 @@ impl Searcher {
 
             let mut proximity_score = 1.0;
             let mut density_mask = active_bitsets[0].clone();
-            density_mask.proximity_expand(250);
+            density_mask.proximity_expand(PROXIMITY_DILATION);
             
             for i in 1..active_bitsets.len() {
                 let mut intersection = active_bitsets[i].clone();
@@ -168,11 +177,11 @@ impl Searcher {
                 if !intersection.is_empty() {
                     proximity_score += 1.0;
                 } else {
-                    proximity_score += 0.3;
+                    proximity_score += PROXIMITY_PENALTY;
                 }
                 
                 let mut next_dilation = active_bitsets[i].clone();
-                next_dilation.proximity_expand(250);
+                next_dilation.proximity_expand(PROXIMITY_DILATION);
                 for (w_res, w_mask) in density_mask.words.iter_mut().zip(next_dilation.words.iter()) {
                     *w_res |= *w_mask;
                 }
@@ -184,35 +193,44 @@ impl Searcher {
         block_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let top_blocks: Vec<u32> = block_scores.into_iter().take(20).map(|(id, _)| id).collect();
 
-        // 5. Verification and Snippet Extraction
+        // Group reads by file descriptor to prevent excessive disk seeks
+        let mut file_cache: HashMap<u32, File> = HashMap::new();
         let mut results = Vec::new();
+
         for b_id in top_blocks {
             let (f_id, offset, len) = self.blocks[b_id as usize];
             let path = &self.files[f_id as usize];
 
-            if let Ok(mut f) = File::open(path) {
-                if f.seek(SeekFrom::Start(offset)).is_ok() {
-                    let mut buffer = vec![0; len as usize];
-                    if f.read_exact(&mut buffer).is_ok() {
-                        let text = String::from_utf8_lossy(&buffer);
-                        let text_lower = text.to_lowercase();
-                        
-                        let mut snippet_pos = None;
-                        for term in expanded_terms.keys() {
-                            if let Some(idx) = find_substring(&text_lower, term) {
-                                snippet_pos = Some(idx);
-                                break;
-                            }
+            let f = file_cache.entry(f_id).or_insert_with(|| File::open(path).unwrap());
+            if f.seek(SeekFrom::Start(offset)).is_ok() {
+                let mut buffer = vec![0; len as usize];
+                if f.read_exact(&mut buffer).is_ok() {
+                    let text = String::from_utf8_lossy(&buffer);
+                    let text_lower = text.to_lowercase();
+                    
+                    let mut snippet_pos = None;
+                    for term in expanded_terms.keys() {
+                        if let Some(idx) = find_substring(&text_lower, term) {
+                            snippet_pos = Some(idx);
+                            break;
+                        }
+                    }
+
+                    if let Some(idx) = snippet_pos {
+                        let mut start = idx.saturating_sub(100);
+                        let mut end = std::cmp::min(text.len(), idx + 200);
+
+                        while start > 0 && !text.is_char_boundary(start) {
+                            start -= 1;
+                        }
+                        while end < text.len() && !text.is_char_boundary(end) {
+                            end += 1;
                         }
 
-                        if let Some(idx) = snippet_pos {
-                            let start = idx.saturating_sub(100);
-                            let end = std::cmp::min(text.len(), idx + 200);
-                            results.push(SearchResult {
-                                file_path: path.clone(),
-                                snippet: format!("...{}...", &text[start..end]),
-                            });
-                        }
+                        results.push(SearchResult {
+                            file_path: path.clone(),
+                            snippet: format!("...{}...", &text[start..end]),
+                        });
                     }
                 }
             }
