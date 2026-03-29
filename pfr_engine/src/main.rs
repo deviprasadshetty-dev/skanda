@@ -4,6 +4,7 @@ mod bridge;
 mod simd_search;
 mod bitset;
 mod compression;
+mod thread_pool;
 
 use std::env;
 use std::time::Instant;
