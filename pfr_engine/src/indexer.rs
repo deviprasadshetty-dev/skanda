@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Write, BufWriter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use crate::compression::encode_delta;
 
 const BLOCK_SIZE: usize = 64 * 1024; // 64KB blocks
 
@@ -33,7 +34,6 @@ impl Indexer {
             if path.is_dir() {
                 self.index_directory(&path);
             } else if path.is_file() {
-                // simple extension filter (only textish files)
                 if let Some(ext) = path.extension() {
                     let ext_str = ext.to_string_lossy().to_lowercase();
                     if ["txt", "md", "csv", "json", "rs", "py", "js"].contains(&ext_str.as_str()) {
@@ -65,10 +65,8 @@ impl Indexer {
             let block_id = self.blocks.len() as u32;
             self.blocks.push((file_id, offset, bytes_read as u32));
 
-            // Lossy string conversion for indexing
             let text = String::from_utf8_lossy(&buffer[..bytes_read]);
             
-            // Extract unique words in block to save index space
             let mut unique_words = HashSet::new();
             for word in text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()) {
                 unique_words.insert(word.to_string());
@@ -86,7 +84,7 @@ impl Indexer {
         let file = File::create(index_path)?;
         let mut writer = BufWriter::new(file);
 
-        // 1. Write Files Metadata
+        // 1. Files
         writer.write_all(&(self.files.len() as u32).to_le_bytes())?;
         for path_str in &self.files {
             let bytes = path_str.as_bytes();
@@ -94,7 +92,7 @@ impl Indexer {
             writer.write_all(bytes)?;
         }
 
-        // 2. Write Blocks Metadata
+        // 2. Blocks
         writer.write_all(&(self.blocks.len() as u32).to_le_bytes())?;
         for (f_id, off, len) in &self.blocks {
             writer.write_all(&f_id.to_le_bytes())?;
@@ -102,17 +100,17 @@ impl Indexer {
             writer.write_all(&len.to_le_bytes())?;
         }
 
-        // 3. Write Inverted Index
+        // 3. Compressed Inverted Index
         writer.write_all(&(self.inverted_index.len() as u32).to_le_bytes())?;
         for (term, block_ids) in &self.inverted_index {
             let bytes = term.as_bytes();
             writer.write_all(&(bytes.len() as u16).to_le_bytes())?;
             writer.write_all(bytes)?;
 
+            let encoded = encode_delta(block_ids);
             writer.write_all(&(block_ids.len() as u32).to_le_bytes())?;
-            for &b_id in block_ids {
-                writer.write_all(&b_id.to_le_bytes())?;
-            }
+            writer.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            writer.write_all(&encoded)?;
         }
 
         writer.flush()?;

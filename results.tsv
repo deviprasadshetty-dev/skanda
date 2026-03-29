@@ -1,3 +1,4 @@
 commit	indexing_time_ms	search_time_ms	status	description
 c626b87	892.0	2.4	keep	baseline PFR 100MB
 1ecf567	892.0	2.5	keep	SIMD-accelerated substring search
+85ef51c	892.0	2.5	keep	BitSet-based proximity scoring

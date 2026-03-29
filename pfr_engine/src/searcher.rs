@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use crate::simd_search::find_substring;
 use crate::bitset::BitSet;
+use crate::compression::decode_delta;
 
 pub struct Searcher {
     inverted_index: HashMap<String, Vec<u32>>,
@@ -52,7 +53,7 @@ impl Searcher {
             blocks.push((f_id, off, len));
         }
 
-        // 3. Inverted Index
+        // 3. Compressed Inverted Index
         let num_terms = read_u32(&buffer, &mut cursor);
         let mut inverted_index = HashMap::with_capacity(num_terms as usize);
         for _ in 0..num_terms {
@@ -61,11 +62,11 @@ impl Searcher {
             let term = String::from_utf8_lossy(&buffer[cursor..cursor+term_len]).to_string();
             cursor += term_len;
 
-            let num_block_ids = read_u32(&buffer, &mut cursor);
-            let mut block_ids = Vec::with_capacity(num_block_ids as usize);
-            for _ in 0..num_block_ids {
-                block_ids.push(read_u32(&buffer, &mut cursor));
-            }
+            let block_ids_count = read_u32(&buffer, &mut cursor);
+            let encoded_len = read_u32(&buffer, &mut cursor) as usize;
+            let block_ids = decode_delta(&buffer[cursor..cursor+encoded_len], block_ids_count as usize);
+            cursor += encoded_len;
+            
             inverted_index.insert(term, block_ids);
         }
 
@@ -84,8 +85,6 @@ impl Searcher {
             return vec![];
         }
 
-        // Proximity-aware block scoring using BitSets
-        // 1. Identify all blocks that contain at least one query term
         let mut all_candidate_blocks = HashMap::new();
         for term in &query_terms {
             if let Some(blocks) = self.inverted_index.get(term) {
@@ -98,12 +97,6 @@ impl Searcher {
         let mut block_scores: Vec<(u32, f32)> = Vec::new();
 
         for &b_id in all_candidate_blocks.keys() {
-            let (_, _, block_len) = self.blocks[b_id as usize];
-            let mut term_bitsets: Vec<BitSet> = Vec::new();
-            
-            // For each query term, find its positions in this block to build bitsets
-            // Note: In a production system, positions would be pre-indexed.
-            // Here we do a fast scan of the block because it's only 64KB.
             let (f_id, offset, len) = self.blocks[b_id as usize];
             let path = &self.files[f_id as usize];
             
@@ -112,6 +105,7 @@ impl Searcher {
                     let mut buffer = vec![0; len as usize];
                     if f.read_exact(&mut buffer).is_ok() {
                         let text = String::from_utf8_lossy(&buffer).to_lowercase();
+                        let mut term_bitsets: Vec<BitSet> = Vec::new();
                         
                         let mut found_any = false;
                         for term in &query_terms {
@@ -130,15 +124,12 @@ impl Searcher {
 
                         if !found_any { continue; }
 
-                        // Score based on Proximity (Density within a window)
-                        // A simple density score: overlap of dilated bitsets
                         let mut density_mask = term_bitsets[0].clone();
-                        density_mask.proximity_expand(200); // 200 byte window
+                        density_mask.proximity_expand(200); 
                         
                         let mut match_count = 1.0;
                         for i in 1..term_bitsets.len() {
                             if !term_bitsets[i].is_empty() {
-                                // If term i is within the window of previous terms
                                 let mut intersection = term_bitsets[i].clone();
                                 for (w_res, w_mask) in intersection.words.iter_mut().zip(density_mask.words.iter()) {
                                     *w_res &= *w_mask;
@@ -147,10 +138,9 @@ impl Searcher {
                                 if !intersection.is_empty() {
                                     match_count += 1.0;
                                 } else {
-                                    match_count += 0.5; // Present but far
+                                    match_count += 0.5;
                                 }
                                 
-                                // Expand density mask to include this term's surroundings
                                 let mut next_dilation = term_bitsets[i].clone();
                                 next_dilation.proximity_expand(200);
                                 for (w_res, w_mask) in density_mask.words.iter_mut().zip(next_dilation.words.iter()) {
@@ -167,7 +157,6 @@ impl Searcher {
             }
         }
 
-        // Sort by highest score first
         block_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let candidate_blocks: Vec<u32> = block_scores.into_iter().take(20).map(|(id, _)| id).collect();
 
