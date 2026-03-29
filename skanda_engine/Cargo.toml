@@ -2,6 +2,13 @@
 name = "skanda_engine"
 version = "0.1.0"
 edition = "2021"
+description = "A zero-dependency, ultra-high-performance retrieval engine designed for the next generation of RAG."
+authors = ["Deviprasad Shetty <deviprasadshetty400@gmail.complaining>"]
+license = "MIT"
+repository = "https://github.com/deviprasadshetty-dev/skanda.git"
+readme = "README.md"
+keywords = ["rag", "search", "engine", "retrieval", "simd"]
+categories = ["text-processing", "database"]
 
 [dependencies]
 memmap2 = "0.9.10"
