@@ -1,7 +1,7 @@
-use std::net::{TcpListener, TcpStream};
-use std::io::{Read, Write};
-use url::Url;
 use crate::searcher::Searcher;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use url::Url;
 
 pub struct Bridge {
     searcher: Searcher,
@@ -31,10 +31,14 @@ impl Bridge {
         let mut buffer = [0; 1024];
         if let Ok(n) = stream.read(&mut buffer) {
             let request = String::from_utf8_lossy(&buffer[..n]);
-            
+
             if let Some(line) = request.lines().next() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[0] == "GET" {
+                if parts.len() >= 2 && parts[0] == "OPTIONS" {
+                    let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                } else if parts.len() >= 2 && parts[0] == "GET" {
                     let path = parts[1];
                     let url_str = format!("http://localhost{}", path);
                     if let Ok(url) = Url::parse(&url_str) {
@@ -52,10 +56,10 @@ impl Bridge {
 
                             if !query.is_empty() {
                                 let results = self.searcher.search(&query, is_fuzzy);
-                                
+
                                 if let Ok(json_response) = serde_json::to_string(&results) {
                                     let response = format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                         json_response.len(),
                                         json_response
                                     );
@@ -65,7 +69,9 @@ impl Bridge {
                             }
                         }
                     }
-                    let _ = stream.write_all(b"HTTP/1.1 404 NOT FOUND\r\n\r\n");
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 NOT FOUND\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                    );
                 }
             }
         }

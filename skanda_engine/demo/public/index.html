@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Skanda Chat — RAG Powered by Skanda Engine</title>
+  <meta name="description" content="Next-generation RAG chat using Skanda Engine's SIMD-accelerated retrieval and OpenRouter free LLMs." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ░ BACKGROUND ░ -->
+<div class="bg-grid"></div>
+<div class="bg-orb orb-1"></div>
+<div class="bg-orb orb-2"></div>
+<div class="bg-orb orb-3"></div>
+
+<!-- ░ LAYOUT ░ -->
+<div class="app">
+
+  <!-- ─── SIDEBAR ─────────────────────────────────── -->
+  <aside class="sidebar" id="sidebar">
+
+    <!-- Logo -->
+    <div class="sidebar-logo">
+      <div class="logo-icon">⚡</div>
+      <div>
+        <div class="logo-title">Skanda Chat</div>
+        <div class="logo-sub">RAG · SIMD · Zero-deps</div>
+      </div>
+    </div>
+
+    <!-- Settings card -->
+    <div class="card settings-card">
+      <div class="card-label">OpenRouter API Key</div>
+      <div class="input-wrap">
+        <input id="apiKey" type="password" placeholder="sk-or-v1-…" autocomplete="off" />
+        <button class="btn-icon" id="toggleKey" title="Show/hide key">👁</button>
+      </div>
+
+      <div class="card-label mt-12 model-label-row">
+        Model
+        <span class="model-count" id="modelCount"></span>
+        <button class="btn-refresh" id="refreshModels" title="Refresh model list">↻</button>
+      </div>
+      <!-- Search filter -->
+      <div class="model-search-wrap">
+        <input id="modelSearch" type="text" placeholder="Search models…" autocomplete="off" />
+        <span class="model-search-icon">⌕</span>
+      </div>
+      <select id="modelSelect" size="1">
+        <option value="" disabled selected>Loading models…</option>
+      </select>
+
+      <div class="toggle-row mt-12">
+        <label class="toggle-label">
+          <input type="checkbox" id="fuzzyToggle" checked />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          Fuzzy Search
+        </label>
+        <span class="badge-info" title="Enables Levenshtein typo-tolerance in Skanda">?</span>
+      </div>
+    </div>
+
+    <!-- Upload zone -->
+    <div class="card upload-card" id="uploadCard">
+      <div class="card-label">Knowledge Files</div>
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-icon">📂</div>
+        <div class="drop-text">Drop files here</div>
+        <div class="drop-sub">txt · md · csv · json · rs · py · js</div>
+        <input type="file" id="fileInput" multiple accept=".txt,.md,.csv,.json,.rs,.py,.js" hidden />
+        <button class="btn-upload" id="uploadBtn">Browse Files</button>
+      </div>
+
+      <!-- File list -->
+      <ul class="file-list" id="fileList"></ul>
+
+      <!-- Index progress bar -->
+      <div class="index-progress" id="indexProgress" hidden>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <span id="progressLabel">Indexing…</span>
+      </div>
+
+      <div class="upload-actions">
+        <div class="status-dot-wrap">
+          <span class="status-dot" id="statusDot"></span>
+          <span class="status-text" id="statusText">Not indexed</span>
+        </div>
+        <button class="btn-clear" id="clearBtn" hidden>🗑 Clear</button>
+      </div>
+    </div>
+
+    <!-- Skanda info -->
+    <div class="card info-card">
+      <div class="info-title">⚡ Skanda Paradigm</div>
+      <ol class="info-steps">
+        <li><b>Predict</b> — LLM generates syntactic footprints</li>
+        <li><b>Retrieve</b> — SIMD engine finds exact matches</li>
+        <li><b>Rank</b> — IDF-weighted proximity scoring</li>
+        <li><b>Answer</b> — LLM grounded in dense context</li>
+      </ol>
+    </div>
+
+  </aside>
+
+  <!-- ─── CHAT AREA ──────────────────────────────── -->
+  <main class="chat-main">
+
+    <!-- Topbar -->
+    <div class="topbar">
+      <button class="btn-icon sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">☰</button>
+      <div class="topbar-center">
+        <span class="topbar-title">Skanda Chat</span>
+        <span class="bridge-badge" id="bridgeBadge">● bridge offline</span>
+      </div>
+      <div class="retrieval-counter" id="retrievalCounter" hidden>
+        <span class="rc-label">last retrieval</span>
+        <span class="rc-value" id="rcValue">—</span>
+        <span class="rc-unit">results</span>
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div class="messages" id="messages">
+      <div class="welcome-screen" id="welcomeScreen">
+        <div class="welcome-logo">⚡</div>
+        <h1 class="welcome-title">Skanda Chat</h1>
+        <p class="welcome-sub">Upload your files, then ask anything.<br/>The engine predicts footprints and retrieves answers in microseconds.</p>
+        <div class="welcome-chips">
+          <button class="chip" onclick="insertPrompt('Summarize the main topics in my documents')">Summarize main topics</button>
+          <button class="chip" onclick="insertPrompt('What are the key functions or concepts defined in these files?')">Key concepts</button>
+          <button class="chip" onclick="insertPrompt('Find any errors or warnings mentioned in the documents')">Find errors / warnings</button>
+          <button class="chip" onclick="insertPrompt('Give me a detailed explanation of how the code works')">Explain the code</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Retrieval drawer -->
+    <div class="retrieval-drawer" id="retrievalDrawer" hidden>
+      <div class="rd-header">
+        <span class="rd-title">🔍 Skanda Retrieved Snippets</span>
+        <button class="rd-close" id="rdClose">✕</button>
+      </div>
+      <div class="rd-body" id="rdBody"></div>
+    </div>
+
+    <!-- Input bar -->
+    <div class="input-bar">
+      <button class="btn-icon attach-btn" id="attachBtn" title="View retrieved snippets">📎</button>
+      <div class="textarea-wrap">
+        <textarea id="userInput" placeholder="Ask anything about your uploaded files…" rows="1"></textarea>
+      </div>
+      <button class="btn-send" id="sendBtn" disabled>
+        <span class="send-icon">↑</span>
+      </button>
+    </div>
+
+  </main>
+
+</div>
+
+<!-- ░ TOAST ░ -->
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

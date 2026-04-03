@@ -6,8 +6,14 @@
 *.bin
 skanda_engine/*.bin
 
-# Test Data
+# Test / Benchmark Data
 skanda_engine/data_heavy/
+skanda_engine/data/
+aliceinwonderland.txt
+
+# Demo App
+skanda_engine/demo/node_modules/
+skanda_engine/demo/uploads/
 
 # OS specific
 .DS_Store
@@ -16,4 +22,3 @@ Thumbs.db
 # Misc
 results.tsv
 everythingpossible.md
-C:\Users\Deviprasad Shetty\.gemini\tmp\res\
