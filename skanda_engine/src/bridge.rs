@@ -1,15 +1,16 @@
 use crate::searcher::Searcher;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use url::Url;
 
 pub struct Bridge {
-    searcher: Searcher,
+    searcher: Arc<Searcher>,
 }
 
 impl Bridge {
     pub fn new(searcher: Searcher) -> Self {
-        Self { searcher }
+        Self { searcher: Arc::new(searcher) }
     }
 
     pub fn listen(&self, port: u16) -> std::io::Result<()> {
@@ -19,61 +20,122 @@ impl Bridge {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    self.handle_client(stream);
+                    let searcher = Arc::clone(&self.searcher);
+                    std::thread::spawn(move || handle_connection(stream, searcher));
                 }
                 Err(e) => eprintln!("Connection failed: {}", e),
             }
         }
         Ok(())
     }
+}
 
-    fn handle_client(&self, mut stream: TcpStream) {
-        let mut buffer = [0; 1024];
-        if let Ok(n) = stream.read(&mut buffer) {
-            let request = String::from_utf8_lossy(&buffer[..n]);
-
-            if let Some(line) = request.lines().next() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[0] == "OPTIONS" {
-                    let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes());
-                    return;
-                } else if parts.len() >= 2 && parts[0] == "GET" {
-                    let path = parts[1];
-                    let url_str = format!("http://localhost{}", path);
-                    if let Ok(url) = Url::parse(&url_str) {
-                        if url.path() == "/search" {
-                            let mut query = String::new();
-                            let mut is_fuzzy = false;
-
-                            for (k, v) in url.query_pairs() {
-                                if k == "q" {
-                                    query = v.into_owned();
-                                } else if k == "fuzzy" && v == "true" {
-                                    is_fuzzy = true;
-                                }
-                            }
-
-                            if !query.is_empty() {
-                                let results = self.searcher.search(&query, is_fuzzy);
-
-                                if let Ok(json_response) = serde_json::to_string(&results) {
-                                    let response = format!(
-                                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                        json_response.len(),
-                                        json_response
-                                    );
-                                    let _ = stream.write_all(response.as_bytes());
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 404 NOT FOUND\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
-                    );
-                }
+fn handle_connection(mut stream: TcpStream, searcher: Arc<Searcher>) {
+    // Read until the HTTP header terminator \r\n\r\n (dynamic buffer, no 1024 cap)
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 512];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buffer.extend_from_slice(&tmp[..n]);
+                if buffer.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if buffer.len() > 8192 { break; } // sanity cap
             }
+            Err(_) => return,
+        }
+    }
+
+    let request = String::from_utf8_lossy(&buffer);
+
+    let first_line = match request.lines().next() {
+        Some(l) => l,
+        None => return,
+    };
+
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 2 { return; }
+
+    if parts[0] == "OPTIONS" {
+        let _ = stream.write_all(
+            b"HTTP/1.1 204 No Content\r\n\
+              Access-Control-Allow-Origin: *\r\n\
+              Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+              Access-Control-Allow-Headers: *\r\n\
+              Connection: close\r\n\r\n",
+        );
+        return;
+    }
+
+    if parts[0] != "GET" {
+        let _ = stream.write_all(
+            b"HTTP/1.1 405 Method Not Allowed\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+        );
+        return;
+    }
+
+    let url_str = format!("http://localhost{}", parts[1]);
+    let url = match Url::parse(&url_str) {
+        Ok(u) => u,
+        Err(_) => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            );
+            return;
+        }
+    };
+
+    if url.path() != "/search" {
+        let _ = stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+        );
+        return;
+    }
+
+    let mut query = String::new();
+    let mut is_fuzzy = false;
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "q"     => query = v.into_owned(),
+            "fuzzy" => is_fuzzy = v == "true",
+            _       => {}
+        }
+    }
+
+    if query.is_empty() {
+        let body = b"[]";
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Access-Control-Allow-Origin: *\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                body.len()
+            ).as_bytes(),
+        );
+        let _ = stream.write_all(body);
+        return;
+    }
+
+    let results = searcher.search(&query, is_fuzzy);
+    match serde_json::to_string(&results) {
+        Ok(json) => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Access-Control-Allow-Origin: *\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                json.len(),
+                json
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+        Err(_) => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            );
         }
     }
 }

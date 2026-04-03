@@ -1,16 +1,60 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use rayon::prelude::*;
 use crate::compression::encode_inverted_entry;
 use crate::SkandaError;
 
+pub const INDEX_MAGIC: &[u8; 4] = b"SKAN";
+pub const INDEX_VERSION: u8 = 1;
+
+// Sorted alphabetically — required for binary_search.
+static STOP_WORDS: &[&str] = &[
+    "a", "about", "after", "all", "also", "an", "and", "any", "are", "as",
+    "at", "be", "been", "before", "being", "below", "between", "both", "but",
+    "by", "can", "could", "did", "do", "does", "during", "each", "either",
+    "few", "for", "from", "had", "has", "have", "he", "her", "here", "him",
+    "his", "how", "i", "if", "in", "into", "is", "it", "its", "just", "may",
+    "me", "might", "more", "most", "my", "neither", "no", "nor", "not", "of",
+    "on", "only", "or", "other", "our", "out", "own", "same", "shall", "she",
+    "should", "so", "some", "such", "than", "that", "the", "their", "then",
+    "there", "these", "they", "this", "those", "through", "to", "too", "up",
+    "very", "was", "we", "were", "what", "when", "where", "which", "who",
+    "will", "with", "would", "yet", "you", "your",
+];
+
+pub fn is_stop_word(word: &str) -> bool {
+    STOP_WORDS.binary_search(&word).is_ok()
+}
+
+/// Recursively collects files matching allowed extensions.
+fn collect_files(dir: &Path, extensions: &[String], out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, extensions, out);
+        } else if path.is_file() {
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if extensions.contains(&ext_str) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+}
+
 pub struct Indexer {
     inverted_index: HashMap<String, Vec<(u32, Vec<u32>)>>,
-    blocks: Vec<(u32, u64, u32)>, 
-    files: Vec<String>, 
+    // (file_id, byte_offset, byte_length, term_count)
+    blocks: Vec<(u32, u64, u32, u16)>,
+    files: Vec<String>,
     allowed_extensions: Vec<String>,
 }
 
@@ -21,8 +65,8 @@ impl Indexer {
             blocks: Vec::new(),
             files: Vec::new(),
             allowed_extensions: vec![
-                "txt".into(), "md".into(), "csv".into(), "json".into(), 
-                "rs".into(), "py".into(), "js".into()
+                "txt".into(), "md".into(), "csv".into(), "json".into(),
+                "rs".into(), "py".into(), "js".into(),
             ],
         }
     }
@@ -32,63 +76,56 @@ impl Indexer {
     }
 
     pub fn index_directory<P: AsRef<Path>>(&mut self, dir_path: P) {
-        let entries = match fs::read_dir(dir_path) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-        paths.retain(|p| {
-            if p.is_dir() || !p.is_file() { return false; }
-            if let Some(ext) = p.extension() {
-                let ext_str = ext.to_string_lossy().to_lowercase();
-                self.allowed_extensions.contains(&ext_str)
-            } else {
-                false
-            }
-        });
-
+        let mut paths: Vec<PathBuf> = Vec::new();
+        collect_files(dir_path.as_ref(), &self.allowed_extensions, &mut paths);
         self.files = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+
         let global_block_counter = std::sync::atomic::AtomicU32::new(0);
 
+        // (file_id, byte_offset, byte_length, block_id_for_sort, term_count)
         let results: Vec<_> = paths.into_par_iter().enumerate().map(|(file_id, path)| {
             let file_id = file_id as u32;
             let mut local_index: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
-            let mut local_blocks: Vec<(u32, u64, u32, u32)> = Vec::new();
+            let mut local_blocks: Vec<(u32, u64, u32, u32, u16)> = Vec::new();
 
             if let Ok(f) = File::open(&path) {
                 let mut reader = BufReader::new(f);
                 let mut offset = 0u64;
                 let mut line = String::new();
-                
+
                 while let Ok(bytes_read) = reader.read_line(&mut line) {
                     if bytes_read == 0 { break; }
-                    
+
                     let block_id = global_block_counter.fetch_add(1, Ordering::Relaxed);
-                    local_blocks.push((file_id, offset, bytes_read as u32, block_id));
-                    
                     let text = line.to_lowercase();
                     let mut block_terms: HashMap<String, Vec<u32>> = HashMap::new();
-                    
+
                     let mut start = 0;
                     for (idx, c) in text.char_indices() {
                         if !c.is_alphanumeric() {
                             if start < idx {
                                 let word = &text[start..idx];
-                                block_terms.entry(word.to_string()).or_default().push(start as u32);
+                                if !is_stop_word(word) {
+                                    block_terms.entry(word.to_string()).or_default().push(start as u32);
+                                }
                             }
                             start = idx + c.len_utf8();
                         }
                     }
                     if start < text.len() {
                         let word = &text[start..];
-                        block_terms.entry(word.to_string()).or_default().push(start as u32);
+                        if !is_stop_word(word) {
+                            block_terms.entry(word.to_string()).or_default().push(start as u32);
+                        }
                     }
+
+                    let term_count = block_terms.len().min(u16::MAX as usize) as u16;
+                    local_blocks.push((file_id, offset, bytes_read as u32, block_id, term_count));
 
                     for (word, positions) in block_terms {
                         local_index.entry(word).or_default().push((block_id, positions));
                     }
-                    
+
                     offset += bytes_read as u64;
                     line.clear();
                 }
@@ -97,7 +134,7 @@ impl Indexer {
         }).collect();
 
         let mut final_index: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
-        let mut final_blocks: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let mut final_blocks: Vec<(u32, u64, u32, u32, u16)> = Vec::new();
 
         for (local_idx, local_blk) in results {
             for (word, entries) in local_idx {
@@ -107,9 +144,8 @@ impl Indexer {
         }
 
         final_blocks.sort_by_key(|b| b.3);
-        
         self.inverted_index = final_index;
-        self.blocks = final_blocks.into_iter().map(|(f, o, l, _)| (f, o, l)).collect();
+        self.blocks = final_blocks.into_iter().map(|(f, o, l, _, tc)| (f, o, l, tc)).collect();
 
         for entries in self.inverted_index.values_mut() {
             entries.sort_by_key(|e| e.0);
@@ -120,6 +156,11 @@ impl Indexer {
         let file = File::create(index_path)?;
         let mut writer = BufWriter::new(file);
 
+        // Header: magic + version
+        writer.write_all(INDEX_MAGIC)?;
+        writer.write_all(&[INDEX_VERSION])?;
+
+        // Files
         writer.write_all(&(self.files.len() as u32).to_le_bytes())?;
         for path_str in &self.files {
             let bytes = path_str.as_bytes();
@@ -127,19 +168,21 @@ impl Indexer {
             writer.write_all(bytes)?;
         }
 
+        // Blocks: file_id(4) + offset(8) + len(4) + term_count(2) = 18 bytes each
         writer.write_all(&(self.blocks.len() as u32).to_le_bytes())?;
-        for (f_id, off, len) in &self.blocks {
+        for (f_id, off, len, term_count) in &self.blocks {
             writer.write_all(&f_id.to_le_bytes())?;
             writer.write_all(&off.to_le_bytes())?;
             writer.write_all(&len.to_le_bytes())?;
+            writer.write_all(&term_count.to_le_bytes())?;
         }
 
+        // Terms
         writer.write_all(&(self.inverted_index.len() as u32).to_le_bytes())?;
         for (term, block_positions) in &self.inverted_index {
             let bytes = term.as_bytes();
             writer.write_all(&(bytes.len() as u16).to_le_bytes())?;
             writer.write_all(bytes)?;
-
             let encoded = encode_inverted_entry(block_positions);
             writer.write_all(&(encoded.len() as u32).to_le_bytes())?;
             writer.write_all(&encoded)?;

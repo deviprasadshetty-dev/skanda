@@ -1,6 +1,7 @@
 use skanda_engine::{Indexer, Searcher, Bridge};
 use std::env;
 use std::time::Instant;
+use serde_json;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -51,7 +52,7 @@ fn main() {
                     let results = s.search(&query, is_fuzzy);
                     
                     if is_json {
-                        println!("{}", format_results_json(&results));
+                        println!("{}", serde_json::to_string_pretty(&results).unwrap_or_default());
                     } else {
                         println!("Found {} results", results.len());
                         for (i, res) in results.iter().enumerate() {
@@ -112,17 +113,3 @@ fn print_usage() {
     println!("  status <index.bin>           Show index metadata");
 }
 
-fn format_results_json(results: &[skanda_engine::SearchResult]) -> String {
-    let mut json = String::from("[\n");
-    for (i, res) in results.iter().enumerate() {
-        json.push_str("  {\n");
-        json.push_str(&format!("    \"file\": \"{}\",\n", res.file_path.replace('\\', "/")));
-        let escaped = res.snippet.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r");
-        json.push_str(&format!("    \"snippet\": \"{}\"\n", escaped));
-        json.push_str("  }");
-        if i < results.len() - 1 { json.push(','); }
-        json.push('\n');
-    }
-    json.push(']');
-    json
-}
